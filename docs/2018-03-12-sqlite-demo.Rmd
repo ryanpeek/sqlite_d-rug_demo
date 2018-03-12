@@ -1,0 +1,221 @@
+---
+title: "Using sqlite in R"
+author: "Ryan Peek"
+date: "*Updated: `r format(Sys.Date())`*"
+output: 
+  html_document:
+    code_folding: hide
+    highlight: pygments
+    theme: yeti
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+```
+
+Databases...are not my expertise. But I have used Access and sqlite pretty extensively. Good news, you can query both from R without too much trouble! They have different purposes, and `sqlite` isn't really a great comparison with the other database options, because it's not a typical client/server SQL database (like MySQL, PostgreSQL, etc.). That means, `sqlite` is not really used as shared single central repository for folks to store/access data. It's best used as a flexible, portable, and pretty simple place to store your data.
+
+**`SQlite`**
+ - Pros: 
+    - Open source and typically very small footprint (disk space)
+    - Very portable, so easy to share/distribute (cross-platform compatible)
+    - Fast and fairly straightforward to use
+    - Functions well with `spatialite`, making it possible to use SQlite within GIS frameworks (QGIS, R, ArcGIS) to store spatial data.
+    - stores all data locally (and not really limited by size, can be up to a terabyte).
+ - Cons:
+    - Single user at a time
+    - Is not meant as a central place for multiple users to access data simulataneously
+    - Not meant for work taking place over a network (client to server).
+
+## Load Packages
+
+To get started we'll load the packages we'll be using for this demo.
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(dplyr);
+  library(readr);
+  library(dbplyr);
+	#library(lubridate);
+	library(RSQLite);
+	library(magrittr)
+	library(DBI)
+  })
+  
+```
+
+## Create or Connect to Database
+
+We can either create a new database, or connect to an existing one. Let's use the `survey` dataset from the [Data Carpentry Ecology lesson](http://www.datacarpentry.org/R-ecology-lesson/05-r-and-databases.html), we'll load that up in a minute, but to start we'll create a database from scratch. Then we'll add tables to it.
+
+```{r createDB}
+
+# new with create=T, or just connect with create=F
+dat_db <- src_sqlite("data/portal_db.sqlite", create = T)
+
+# check list of table names, should be empty
+src_tbls(dat_db)
+
+```
+
+### Load Tables/CSV
+
+Ok, we've created a `portal_db.sqlite` in our data folder. Now we need to put stuff in it. Let's use these three files from the Data Carpentry Ecology lesson, `surveys`, `species`, `plots`. Below I read these directly in from a weblink using the `readr` package.
+
+```{r getSurveyData}
+
+surveys <- read_csv("https://gge-ucd.github.io/R-DAVIS/data/surveys.csv")
+glimpse(surveys)
+species <- read_csv("https://gge-ucd.github.io/R-DAVIS/data/species.csv")
+glimpse(species)
+plots <- read_csv("https://gge-ucd.github.io/R-DAVIS/data/plots.csv")
+glimpse(plots)
+
+# and for good measure, let's make a spatial table of the XY points for each of our plotIDs. Use `runif` to randomply sample from a uniform distribution.
+set.seed(33) # to make this a bit more repeatable
+plots_xy <- tibble("plot_id"=1:24, "long" = runif(24) + 120 * -1, "lat" = runif(24) + 37)
+```
+
+Quick map of where our completely random survey data (`xy_dat`) exist: 
+
+```{r bonusMapchunk, eval=T, echo=F}
+# make it spatial with sf package
+library(sf)
+plots_sf <- st_as_sf(plots_xy,
+                  coords = c("long", "lat"), # can use numbers here too
+                  remove = F, # don't remove these lat/lon cols from df
+                  crs = 4326) # basic mercator projection for lat/lon
+
+# quick map of where these points are
+mapview::mapview(plots_sf) # mostly around Yosemite and Sierra NF.
+
+```
+
+We now have 4 tables that we can put into our empty `.sqlite` database.
+
+### Add Tables to DB
+
+The easiest way to copy these tables into our database is with `copy_to`.
+
+```{r copyTables}
+
+copy_to(dat_db, surveys, temporary = FALSE)
+copy_to(dat_db, species, temporary = FALSE)
+copy_to(dat_db, plots, temporary = FALSE)
+copy_to(dat_db, plots_xy, temporary=FALSE)
+
+# now let's remove these from our environment:
+rm(surveys, species, plots, plots_xy)
+
+
+```
+
+Great, that was easy! Now let's take a look at our tables.
+
+### Check Tables
+
+If we want to view the tables in a `sqlite` database, and get a sense of the dimensions of these data, we can use either `DBI` or `dplyr` functions.
+
+I'm using `purrr` here as well to demonstrate how to *loop* through a list of table names and then return the `dim()` of the table.
+
+```{r checkTables}
+
+src_tbls(dat_db) # using dplyr/dbplyr
+dbListTables(dat_db$con) # DBI package
+
+# check dimensions of all tables using some purrr
+library(purrr)
+map(src_tbls(dat_db), ~dim(dbReadTable(dat_db$con, .))) %>%
+	set_names(., src_tbls(dat_db))
+
+# quickly see dim of single table
+dim(dbReadTable(dat_db$con, "surveys"))
+
+# quickly see first few rows using a pipe
+tbl(dat_db, "surveys") %>% head
+
+```
+
+### Collecting Tables
+
+One of the things that makes these sqlite databases fast and lightweight, is they permit reading the data without copying it into your actual environment. So above, we accessed the database and determined the dimensions of each table, but we didn't bring a copy of the tables themselves into our Global R environment.
+
+Let's actually copy or `collect` these tables so we have them available for manipulation, data analysis, etc.
+
+```{r}
+
+plots <- tbl(dat_db, "plots") %>% collect()
+plot_xy <- tbl(dat_db, "plots_xy") %>% collect()
+
+```
+
+We could join these tables into one, and then re-add the new table, or we could potentially append. Let's pretend there's a 25 plot_id we forgot to add. 
+
+### Append to Existing Table
+
+This will append records to the end of the table, it will not join/merge in the same way our joins work elsewhere.
+
+```{r appendtoDB}
+
+src_tbls(dat_db) # these are tables
+
+# check size of table
+dim(dbReadTable(dat_db$con, "plots"))
+
+# read in the data to add
+new_plot_dat <- tibble("plot_id"=25, "plot_type"="Climate Plot")
+
+# OPTION 1: DBI
+dbWriteTable(dat_db$con, name = "plots", value = new_plot_dat, append = TRUE) 
+tbl(dat_db, "plots") %>% collect() %>% print(n=25)
+
+# OPTION 2: dbplyr
+db_insert_into(con = dat_db$con, table = "plots", values = new_plot_dat)
+tbl(dat_db, "plots") %>% collect() %>% print(n=26)
+# check size of table again, should be 27 rows
+dim(dbReadTable(dat_db$con, "plots"))
+
+```
+
+### Drop or Delete a Table
+
+Well, let's say we screwed up. We only wanted to add one row with the new idea, not two.
+
+```{r dropTable}
+
+src_tbls(dat_db) # these are tables
+
+# drop or delete a TABLE
+dat_db$con %>% db_drop_table(table='plots') # delete a table
+
+# check
+src_tbls(dat_db)
+
+# recollect it:
+plots <- read_csv("https://gge-ucd.github.io/R-DAVIS/data/plots.csv")
+copy_to(dat_db, plots, temporary = FALSE)
+
+src_tbls(dat_db) # these are tables
+dim(dbReadTable(dat_db$con, "plots")) # check size of table
+
+# check size of tables
+purrr::map(src_tbls(dat_db), ~dim(dbReadTable(dat_db$con, .))) %>%
+	set_names(., src_tbls(dat_db))
+
+```   
+
+## Connect with DB (v2)
+
+We can also use the `DBI` package to connect with our database.
+
+```{r dbi}
+
+# connect
+db <- "data/portal_db.sqlite"
+dbcon <- dbConnect(dbDriver("SQLite"), db)
+dbListTables(dbcon)
+dbListFields(dbcon, "plots_xy")
+plotsxy = dbReadTable(dbcon, "plots_xy")
+```
+
