@@ -17,7 +17,9 @@ library(here)
 Databases...are not my expertise. But I have used Access and sqlite pretty extensively. Good news, you can query both from R without too much trouble! They have different purposes, and `sqlite` isn't really a great comparison with the other database options, because it's not a typical client/server SQL database (like MySQL, PostgreSQL, etc.). That means, `sqlite` is not really used as shared single central repository for folks to store/access data. It's best used as a flexible, portable, and pretty simple place to store your data.
 
 **`SQlite`**
+ 
  - Pros: 
+ 
     - Open source and typically very small footprint (disk space)
     - Very portable, so easy to share/distribute (cross-platform compatible)
     - Fast and fairly straightforward to use
@@ -52,7 +54,7 @@ We can either create a new database, or connect to an existing one. Let's use th
 ```{r createDB}
 
 # new with create=T, or just connect with create=F
-dat_db <- src_sqlite("data/portal_db.sqlite", create = T)
+dat_db <- src_sqlite(here("data/portal_db.sqlite"), create = T)
 
 # check list of table names, should be empty
 src_tbls(dat_db)
@@ -64,7 +66,7 @@ src_tbls(dat_db)
 Ok, we've created a `portal_db.sqlite` in our data folder. Now we need to put stuff in it. Let's use these three files from the Data Carpentry Ecology lesson, `surveys`, `species`, `plots`. Below I read these directly in from a weblink using the `readr` package.
 
 ```{r getSurveyData}
-
+# load with readr package
 surveys <- read_csv("https://gge-ucd.github.io/R-DAVIS/data/surveys.csv")
 glimpse(surveys)
 species <- read_csv("https://gge-ucd.github.io/R-DAVIS/data/species.csv")
@@ -107,8 +109,7 @@ copy_to(dat_db, plots_xy, temporary=FALSE)
 
 # now let's remove these from our environment:
 rm(surveys, species, plots, plots_xy)
-
-
+rm(plots_sf)
 ```
 
 Great, that was easy! Now let's take a look at our tables.
@@ -173,7 +174,7 @@ tbl(dat_db, "plots") %>% collect() %>% print(n=25)
 # OPTION 2: dbplyr
 db_insert_into(con = dat_db$con, table = "plots", values = new_plot_dat)
 tbl(dat_db, "plots") %>% collect() %>% print(n=26)
-# check size of table again, should be 27 rows
+# check size of table again, should be 26 rows
 dim(dbReadTable(dat_db$con, "plots"))
 
 ```
@@ -209,13 +210,25 @@ purrr::map(src_tbls(dat_db), ~dim(dbReadTable(dat_db$con, .))) %>%
 
 We can also use the `DBI` package to connect with our database.
 
-```{r dbi}
+```{r dbi, echo=T, eval=T}
 
 # connect
 db <- "data/portal_db.sqlite"
 dbcon <- dbConnect(dbDriver("SQLite"), db)
 dbListTables(dbcon)
 dbListFields(dbcon, "plots_xy")
-plotsxy = dbReadTable(dbcon, "plots_xy")
+plotsxy <- dbReadTable(dbcon, "plots_xy")
+surveys <- dbReadTable(dbcon, "surveys")
+
+dbDisconnect(dbcon)
 ```
+
+
+
+
+
+
+
+
+
 
